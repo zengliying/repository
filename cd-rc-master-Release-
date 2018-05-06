@@ -1,0 +1,106 @@
+#!groovy
+
+def GIT_COMMIT = "0000000"
+
+node('master') {
+timestamps {
+gitlabBuilds(builds: ["Cleanup", "Checkout", "CppCheck", "Build", "Archive", "Deploy"]) {
+    
+    //
+    // Make sure this is a clean build.
+    //
+    stage("Cleanup environment") {
+        gitlabCommitStatus("Cleanup") {   
+            timeout(1) {
+                dir('build'){ deleteDir() }
+                node('win-qt-deploy') { dir('build'){ deleteDir() } }
+    }}}
+
+    //
+    // Checkout our project
+    //
+    stage("Checking out sources") {
+        gitlabCommitStatus("Checkout") {
+            timeout(2) {
+
+            // Checkout on master to get the Git commit hash.
+            checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'cec823de-48db-4265-b9a2-aaf5a6d08f84', url: 'git@125.69.90.110:crisisgo-dev/crisisgo-pc.git']]])
+            GIT_COMMIT = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+            
+            node('win-qt-deploy') {
+                checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'cec823de-48db-4265-b9a2-aaf5a6d08f84', url: 'git@125.69.90.110:crisisgo-dev/crisisgo-pc.git']]])
+            }
+    }}}
+    
+    //
+    // CppChecking
+    //
+    stage("CppCheck Ananysising") {
+        gitlabCommitStatus("CppCheck") {
+            node('win-qt-deploy'){ bat 'cppcheck -i src/third_party -j4 --inline-suppr --error-exitcode=1 --enable=warning,performance,portability src' }
+    }}
+    
+    //
+    // Build the source tree.
+    //
+    stage("Building") {
+        gitlabCommitStatus("Build") {
+            timeout(10) { node('win-qt-deploy') { dir('build') {
+                bat 'cmake -DCMAKE_BUILD_TYPE=Release ..\\src'
+                bat 'cmake --build . --config Release --target install'
+            }}}
+    }}
+    
+    //
+    // Libraries and DEMO archiving
+    //
+    stage('Archiving') {
+    gitlabCommitStatus("Archive") {
+        node('win-qt-deploy') {
+            dir('build/artifacts/redist/x86') {
+                stash include: '*', name: 'DEPLOY_WIN32'
+            }
+            
+            // Grab jenkins build properties for deployment.
+            dir('src/Jenkinsfile'){
+                stash include: 'jenkins_build.properties', name: 'JENKINS_BUILD_PROPERTY'
+            }
+        }
+    }}
+    
+    //
+    // Deploying to Artifactory
+    //
+    stage("Deploy") {
+    gitlabCommitStatus("Deploy") {
+    timeout(1) {
+        dir('build') {
+            unstash 'JENKINS_BUILD_PROPERTY'                
+            def build_prop          = readProperties file:'jenkins_build.properties'
+            def kProjectName        = build_prop.kProjectName
+            def kVersionNameMajor   = build_prop.kVersionNameMajor
+            def kVersionNameMinor   = build_prop.kVersionNameMinor
+            def kVersionNamePatch   = build_prop.kVersionNamePatch
+            def kVersionCode        = build_prop.kVersionCode
+            def kDeployFilePrefix   = "${kProjectName}-${kVersionNameMajor}.${kVersionNameMinor}.${kVersionNamePatch}.${kVersionCode}-rc+build.${BUILD_NUMBER}.sha.${GIT_COMMIT}"
+        
+            dir('redist/x86')       { unstash 'DEPLOY_WIN32' }
+            
+            sh "zip -r ${kDeployFilePrefix}.zip         redist/x86/*"
+            
+            def deploy_spec = """{
+                "files": [{
+                    "pattern": "*.zip",
+                    "target": "crisisgo-pc-release-candidate/"
+                }]
+            }"""
+
+            def deploy_server = Artifactory.server CRISISGO_ARTIFACTORY_SERVER
+            deploy_server.publishBuildInfo(deploy_server.upload(deploy_spec))
+        }
+    }}}
+
+    
+} // gitlabBuilds        
+} // timestamps
+} // node master

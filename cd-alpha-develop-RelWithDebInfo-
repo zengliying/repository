@@ -1,0 +1,121 @@
+#!groovy
+
+def GIT_COMMIT          = "0000000"
+def kProjectName        = ""
+def kVersionNameMajor   = 0
+def kVersionNameMinor   = 0
+def kVersionNamePatch   = 0
+def kVersionCode        = 0
+def kDeployFilePrefix   = ""  
+
+node('master') {
+timestamps {
+gitlabBuilds(builds: ["Cleanup", "Checkout", "CppCheck", "Build", "Archive", "Deploy"]) {
+    
+    //
+    // Make sure this is a clean build.
+    //
+    stage("Cleanup environment") {
+        gitlabCommitStatus("Cleanup") {   
+            timeout(1) {
+                dir('build'){ deleteDir() }
+                node('win-qt-deploy') { dir('build'){ deleteDir() } }
+    }}}
+
+    //
+    // Checkout our project
+    //
+    stage("Checking out sources") {
+        gitlabCommitStatus("Checkout") {
+            timeout(2) {
+
+            // Checkout on master to get the Git commit hash.
+            checkout([$class: 'GitSCM', branches: [[name: '*/v5.0.4']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'cec823de-48db-4265-b9a2-aaf5a6d08f84', url: 'git@125.69.90.110:crisisgo-dev/crisisgo-pc.git']]])
+            GIT_COMMIT = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+            
+            node('win-qt-deploy') {
+                checkout([$class: 'GitSCM', branches: [[name: '*/v5.0.4']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'cec823de-48db-4265-b9a2-aaf5a6d08f84', url: 'git@125.69.90.110:crisisgo-dev/crisisgo-pc.git']]])
+            }
+    }}}
+    
+    //
+    // CppChecking
+    //
+    stage("CppCheck Ananysising") {
+        gitlabCommitStatus("CppCheck") {
+            node('win-qt-deploy'){ bat 'cppcheck -i src/third_party -j4 --inline-suppr --error-exitcode=1 --enable=warning,performance,portability src' }
+    }}
+    
+    //
+    // Build the source tree.
+    //
+    stage("Building") {
+        gitlabCommitStatus("Build") {
+            timeout(10) { node('win-qt-deploy') { dir('build') {
+                def build_prop          = readProperties file:'../Jenkinsfile/jenkins_build.properties' 
+                
+                kProjectName        = build_prop.kProjectName
+                kVersionNameMajor   = build_prop.kVersionNameMajor
+                kVersionNameMinor   = build_prop.kVersionNameMinor
+                kVersionNamePatch   = build_prop.kVersionNamePatch
+                kVersionCode        = build_prop.kVersionCode
+             
+                bat 'cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ..\\src'
+                bat 'cmake --build . --config RelWithDebInfo --target install'
+                bat "..\\installer\\build_msi.bat ${kVersionNameMajor}.${kVersionNameMinor}.${kVersionNamePatch}.${kVersionCode}"
+            }}}
+    }}
+    
+    //
+    // Libraries and DEMO archiving
+    //
+    stage('Archiving') {
+    gitlabCommitStatus("Archive") {
+        node('win-qt-deploy') {
+            dir('build') {
+                stash includes: '*.msi', name: 'DEPLOY_WIN32_MSI'
+            }
+            
+            dir('build/artifacts/symbols/x86') {
+                stash includes: '*', name: 'SYMBOLS_WIN32'
+            }
+        }
+    }}
+    
+    //
+    // Deploying to Artifactory
+    //
+    stage("Deploy") {
+    gitlabCommitStatus("Deploy") {
+    timeout(1) {
+        dir('build') {
+            kDeployFilePrefix = "${kProjectName}-${kVersionNameMajor}.${kVersionNameMinor}.${kVersionNamePatch}.${kVersionCode}-alpha+build.${BUILD_NUMBER}.sha.${GIT_COMMIT}"
+
+            dir('symbols/x86') { unstash 'SYMBOLS_WIN32' }
+            unstash 'DEPLOY_WIN32_MSI'
+            
+            sh "zip -r ${kDeployFilePrefix}.symbols.zip symbols/x86/*"
+            
+            def upload_target = "crisisgo-pc-alpha/${kVersionNameMajor}.${kVersionNameMinor}.${kVersionNamePatch}.${kVersionCode}-alpha+build.${BUILD_NUMBER}/"
+            def deploy_spec = """{
+                "files": [
+                    {
+                        "pattern": "*.zip",
+                        "target": "$upload_target"
+                    },
+                    {
+                        "pattern": "*.msi",
+                        "target": "$upload_target" 
+                    }
+                ]
+            }"""
+
+            def deploy_server = Artifactory.server CRISISGO_ARTIFACTORY_SERVER
+            deploy_server.publishBuildInfo(deploy_server.upload(deploy_spec))
+        }
+    }}}
+
+    
+} // gitlabBuilds        
+} // timestamps
+} // node master
