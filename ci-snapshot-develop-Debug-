@@ -1,0 +1,54 @@
+#!groovy
+
+node('master') {
+timestamps {
+gitlabBuilds(builds: ["Cleanup", "Checkout", "CppCheck", "Build"]) {
+    
+    //
+    // Make sure this is a clean build.
+    //
+    stage("Cleanup environment") {
+        gitlabCommitStatus("Cleanup") {   
+            timeout(1) {
+                dir('build'){ deleteDir() }
+                node('win-qt-deploy') { dir('build'){ deleteDir() } }
+    }}}
+
+    //
+    // Checkout our project
+    //
+    stage("Checking out sources") {
+        gitlabCommitStatus("Checkout") {
+            timeout(2) {
+
+            // Checkout on master to get the Git commit hash.
+            checkout([$class: 'GitSCM', branches: [[name: '*/v5.0.4']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'cec823de-48db-4265-b9a2-aaf5a6d08f84', url: 'git@125.69.90.110:crisisgo-dev/crisisgo-pc.git']]])
+            
+            node('win-qt-deploy') {
+                checkout([$class: 'GitSCM', branches: [[name: '*/v5.0.4']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'cec823de-48db-4265-b9a2-aaf5a6d08f84', url: 'git@125.69.90.110:crisisgo-dev/crisisgo-pc.git']]])
+            }
+    }}}
+    
+    //
+    // CppChecking
+    //
+    stage("CppCheck Ananysising") {
+        gitlabCommitStatus("CppCheck") {
+            node('win-qt-deploy'){ bat 'cppcheck -i src/third_party -j4 --inline-suppr --error-exitcode=1 --enable=warning,performance,portability src' }
+    }}
+    
+    //
+    // Build the source tree.
+    //
+    stage("Building") {
+        gitlabCommitStatus("Build") {
+            timeout(10) { node('win-qt-deploy') { dir('build') {
+                bat 'cmake -DCMAKE_BUILD_TYPE=Debug ..\\src'
+                bat 'cmake --build . --config Debug'
+            }}}
+    }}
+
+    
+} // gitlabBuilds        
+} // timestamps
+} // node master
